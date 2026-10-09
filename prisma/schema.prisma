@@ -1,0 +1,335 @@
+// 杨小厨 · Prisma schema (MySQL / MariaDB via XAMPP)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  OWNER
+  ADMIN
+}
+
+/// Kitchen flow: PENDING (new) → PREPARING → SERVING (some dishes served) → SERVED (all served).
+/// SERVING/SERVED are derived from per-item ticks. COMPLETED is set when the table's bill is closed.
+enum OrderStatus {
+  PENDING
+  PREPARING
+  SERVING
+  SERVED
+  COMPLETED
+  CANCELLED
+}
+
+enum SessionStatus {
+  OPEN
+  CLOSED
+}
+
+/// How a bill was closed: paid at checkout, or cleared by the owner without payment.
+enum CloseType {
+  PAID
+  CLEARED
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  OTHER
+}
+
+model User {
+  id           Int      @id @default(autoincrement())
+  email        String   @unique @db.VarChar(191)
+  passwordHash String   @db.VarChar(255)
+  displayName  String   @db.VarChar(100)
+  role         UserRole @default(OWNER)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  restaurants    RestaurantUser[]
+  statusChanges  OrderStatusHistory[]
+  closedSessions TableSession[]
+
+  @@map("users")
+}
+
+model Restaurant {
+  id               Int      @id @default(autoincrement())
+  slug             String   @unique @db.VarChar(64)
+  /// Base-language fields (Chinese for 杨小厨); *En / *Fr are optional translations.
+  name             String   @db.VarChar(120)
+  nameEn           String?  @db.VarChar(120)
+  nameFr           String?  @db.VarChar(120)
+  logoUrl          String?  @db.VarChar(500)
+  description      String?  @db.Text
+  descriptionEn    String?  @db.Text
+  descriptionFr    String?  @db.Text
+  address          String?  @db.VarChar(255)
+  phone            String?  @db.VarChar(50)
+  openingHours     String?  @db.Text
+  openingHoursEn   String?  @db.Text
+  openingHoursFr   String?  @db.Text
+  /// New orders skip PENDING and go straight to PREPARING.
+  autoAcceptOrders Boolean  @default(false)
+  currency         String   @default("EUR") @db.Char(3)
+  defaultLanguage  String   @default("zh-CN") @db.VarChar(10)
+  /// Next human-facing order number (#1024). Incremented atomically inside the order transaction.
+  nextOrderNumber  Int      @default(1001)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  users       RestaurantUser[]
+  tables      Table[]
+  categories  Category[]
+  products    Product[]
+  ingredients Ingredient[]
+  orders      Order[]
+  sessions    TableSession[]
+
+  @@map("restaurants")
+}
+
+model RestaurantUser {
+  id           Int        @id @default(autoincrement())
+  restaurantId Int
+  userId       Int
+  role         UserRole   @default(OWNER)
+  createdAt    DateTime   @default(now())
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([restaurantId, userId])
+  @@index([userId])
+  @@map("restaurant_users")
+}
+
+model Table {
+  id           Int            @id @default(autoincrement())
+  restaurantId Int
+  tableNumber  String         @db.VarChar(20)
+  qrToken      String         @unique @db.VarChar(32)
+  isActive     Boolean        @default(true)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+  restaurant   Restaurant     @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  orders       Order[]
+  sessions     TableSession[]
+
+  @@unique([restaurantId, tableNumber])
+  @@map("dining_tables")
+}
+
+model Category {
+  id            Int        @id @default(autoincrement())
+  restaurantId  Int
+  name          String     @db.VarChar(80)
+  nameEn        String?    @db.VarChar(80)
+  nameFr        String?    @db.VarChar(80)
+  description   String?    @db.VarChar(255)
+  descriptionEn String?    @db.VarChar(255)
+  descriptionFr String?    @db.VarChar(255)
+  sortOrder     Int        @default(0)
+  isActive      Boolean    @default(true)
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+  restaurant    Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  products      Product[]
+
+  @@index([restaurantId, sortOrder])
+  @@map("categories")
+}
+
+model Product {
+  id            Int        @id @default(autoincrement())
+  restaurantId  Int
+  categoryId    Int
+  name          String     @db.VarChar(120)
+  nameEn        String?    @db.VarChar(120)
+  nameFr        String?    @db.VarChar(120)
+  description   String?    @db.Text
+  descriptionEn String?    @db.Text
+  descriptionFr String?    @db.Text
+  price         Decimal    @db.Decimal(10, 2)
+  currency      String     @default("EUR") @db.Char(3)
+  imageUrl      String?    @db.VarChar(500)
+  isAvailable   Boolean    @default(true)
+  isVegetarian  Boolean    @default(false)
+  isVegan       Boolean    @default(false)
+  isSpicy       Boolean    @default(false)
+  isGlutenFree  Boolean    @default(false)
+  sortOrder     Int        @default(0)
+  /// Soft delete: keeps historical order items linked; hidden everywhere else.
+  deletedAt     DateTime?
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+  restaurant    Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  category      Category   @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  ingredients ProductIngredient[]
+  allergens   ProductAllergen[]
+  orderItems  OrderItem[]
+
+  @@index([restaurantId, categoryId])
+  @@map("products")
+}
+
+model Ingredient {
+  id           Int        @id @default(autoincrement())
+  restaurantId Int
+  name         String     @db.VarChar(80)
+  nameEn       String?    @db.VarChar(80)
+  nameFr       String?    @db.VarChar(80)
+  description  String?    @db.VarChar(255)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+
+  products ProductIngredient[]
+
+  @@unique([restaurantId, name])
+  @@map("ingredients")
+}
+
+model ProductIngredient {
+  productId    Int
+  ingredientId Int
+  sortOrder    Int        @default(0)
+  product      Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
+  ingredient   Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+
+  @@id([productId, ingredientId])
+  @@index([ingredientId])
+  @@map("product_ingredients")
+}
+
+/// Global reference table: EU 14 allergens (Regulation 1169/2011).
+model Allergen {
+  id          Int      @id @default(autoincrement())
+  code        String   @unique @db.VarChar(32)
+  name        String   @db.VarChar(80)
+  nameEn      String   @db.VarChar(80)
+  nameFr      String   @db.VarChar(80)
+  description String?  @db.VarChar(255)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  products ProductAllergen[]
+
+  @@map("allergens")
+}
+
+model ProductAllergen {
+  productId  Int
+  allergenId Int
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  allergen   Allergen @relation(fields: [allergenId], references: [id], onDelete: Cascade)
+
+  @@id([productId, allergenId])
+  @@index([allergenId])
+  @@map("product_allergens")
+}
+
+model Order {
+  id                  Int          @id @default(autoincrement())
+  /// Unguessable id used by the customer's order-status page.
+  publicId            String       @unique @db.VarChar(32)
+  restaurantId        Int
+  tableId             Int?
+  /// The table bill this order belongs to; a table can order several times per visit.
+  sessionId           Int
+  tableNumberSnapshot String       @db.VarChar(20)
+  orderNumber         Int
+  status              OrderStatus  @default(PENDING)
+  currency            String       @default("EUR") @db.Char(3)
+  totalAmount         Decimal      @db.Decimal(10, 2)
+  note                String?      @db.VarChar(500)
+  /// Staff confirmed this order belongs to the same guests (dismisses the "new guests?" hint).
+  sameGuestsConfirmed Boolean      @default(false)
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+  restaurant          Restaurant   @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  table               Table?       @relation(fields: [tableId], references: [id], onDelete: SetNull)
+  session             TableSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  items         OrderItem[]
+  statusHistory OrderStatusHistory[]
+
+  @@unique([restaurantId, orderNumber])
+  @@index([restaurantId, status, createdAt])
+  @@index([restaurantId, createdAt])
+  @@index([tableId])
+  @@index([sessionId])
+  @@map("orders")
+}
+
+model OrderItem {
+  id                    Int       @id @default(autoincrement())
+  orderId               Int
+  productId             Int?
+  productNameSnapshot   String    @db.VarChar(120)
+  productNameEnSnapshot String?   @db.VarChar(120)
+  productNameFrSnapshot String?   @db.VarChar(120)
+  unitPriceSnapshot     Decimal   @db.Decimal(10, 2)
+  quantity              Int
+  /// Set when staff tick this dish as delivered to the table.
+  servedAt              DateTime?
+  totalPrice            Decimal   @db.Decimal(10, 2)
+  createdAt             DateTime  @default(now())
+  order                 Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product               Product?  @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  @@index([orderId])
+  @@index([productId])
+  @@map("order_items")
+}
+
+model OrderStatusHistory {
+  id              Int          @id @default(autoincrement())
+  orderId         Int
+  fromStatus      OrderStatus?
+  toStatus        OrderStatus
+  changedByUserId Int?
+  createdAt       DateTime     @default(now())
+  order           Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  changedBy       User?        @relation(fields: [changedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([orderId])
+  @@index([changedByUserId])
+  @@map("order_status_history")
+}
+
+/// One visit of a table ("bill"). Opened by the first order, closed by the owner at checkout.
+model TableSession {
+  id                  Int            @id @default(autoincrement())
+  restaurantId        Int
+  tableId             Int?
+  tableNumberSnapshot String         @db.VarChar(20)
+  status              SessionStatus  @default(OPEN)
+  /// Frozen at checkout for reconciliation.
+  totalAmount         Decimal?       @db.Decimal(10, 2)
+  paymentMethod       PaymentMethod?
+  closeType           CloseType?
+  /// Optional reason when a table is cleared without payment.
+  closeNote           String?        @db.VarChar(255)
+  openedAt            DateTime       @default(now())
+  closedAt            DateTime?
+  closedByUserId      Int?
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+  restaurant          Restaurant     @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  table               Table?         @relation(fields: [tableId], references: [id], onDelete: SetNull)
+  closedBy            User?          @relation(fields: [closedByUserId], references: [id], onDelete: SetNull)
+  orders              Order[]
+
+  @@index([restaurantId, status])
+  @@index([restaurantId, closedAt])
+  @@index([tableId, status])
+  @@index([closedByUserId])
+  @@map("table_sessions")
+}
